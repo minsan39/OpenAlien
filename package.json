@@ -1,0 +1,42 @@
+{
+  "name": "openalien",
+  "version": "0.1.0",
+  "description": "🛸 OpenAlien - 开源的 AI 终端助手，专为中文用户设计",
+  "main": "dist/index.js",
+  "bin": {
+    "openalien": "./dist/cli.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/cli.js",
+    "dev": "ts-node src/cli.ts"
+  },
+  "keywords": [
+    "ai",
+    "chatbot",
+    "cli",
+    "terminal",
+    "deepseek",
+    "llm"
+  ],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "axios": "^1.7.9",
+    "blessed": "^0.1.81",
+    "chalk": "^4.1.2",
+    "conf": "^10.2.0",
+    "inquirer": "^8.2.6",
+    "ora": "^5.4.1"
+  },
+  "devDependencies": {
+    "@types/blessed": "^0.1.25",
+    "@types/inquirer": "^9.0.7",
+    "@types/node": "^22.10.2",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.7.2"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
