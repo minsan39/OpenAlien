@@ -6,6 +6,16 @@ import { Config, Message, getProvider } from '../types';
 import { chatStream } from '../providers';
 import { printLogo, printWelcome, printGoodbye, printDivider } from '../ui';
 import { MemorySystem } from '../memory';
+import {
+  ToolRegistry,
+  registerBuiltinTools,
+  CapabilityReporter,
+  ToolCaller,
+  ToolCallParser,
+  TOOL_CALLING_PROMPT,
+} from '../tools';
+import { MCPPool } from '../mcp';
+import { SkillManager } from '../skills';
 
 const THINK_START_TAG = '<think&gt;';
 const THINK_END_TAG = '</think&gt;';
@@ -14,18 +24,12 @@ const SYSTEM_PROMPT = `你是 OpenAlien，一个开源的 AI 终端助手，专�
 
 关于你：
 - 名称：OpenAlien（外星人）
-- 版本：0.1.1
+- 版本：0.2.0
 - 开发者：王伟闽
 - 性质：开源项目，MIT 许可证
 - 特点：轻量、快速、模块化，支持多种国产 AI 模型
 - 支持的模型提供商：DeepSeek、智谱 GLM、千问 Qwen、MiniMax
-- 设计理念：最小可行版本 + 模块化扩展（Skill 系统）
-
-你的能力：
-- 与用户进行自然语言对话
-- 回答问题、提供建议、协助完成任务
-- 拥有记忆系统，可以记住用户习惯和重要信息
-- 未来可通过 Skill 扩展更多能力（视觉、语音、文件操作等）
+- 设计理念：模块化扩展（MCP + Skills 系统）
 
 记忆系统说明：
 - 长期记忆：存储用户偏好、习惯、重要信息，会自动注入到对话中
@@ -33,9 +37,13 @@ const SYSTEM_PROMPT = `你是 OpenAlien，一个开源的 AI 终端助手，专�
 - 你可以自动识别并记住/遗忘信息，无需用户手动操作
 
 你的性格：
-- 友好、乐于助人
-- 回答简洁明了，适合终端环境
+- 参考简洁明了，适合终端环境
 - 对中文用户友好
+- 诚实：如果做不到某事，直接告诉用户
+
+{{CAPABILITY_REPORT}}
+
+{{TOOL_CALLING_PROMPT}}
 
 重要输出格式：
 在回答问题之前，请先在 <think&gt;</think&gt; 标签中展示你的思考过程。格式如下：
@@ -119,6 +127,11 @@ export class ChatSession {
   private showThinking: boolean = true;
   private founderMode: boolean = false;
   private memory: MemorySystem;
+  private toolRegistry: ToolRegistry;
+  private mcpPool: MCPPool;
+  private skillManager: SkillManager;
+  private capabilityReporter: CapabilityReporter;
+  private toolCaller: ToolCaller;
 
   constructor(config: Config) {
     this.config = config;
@@ -129,6 +142,27 @@ export class ChatSession {
     });
     this.memory = new MemorySystem();
     this.memory.setConfig(config);
+    
+    this.mcpPool = new MCPPool();
+    this.toolRegistry = new ToolRegistry(config, this.memory);
+    this.skillManager = new SkillManager(this.mcpPool);
+    this.capabilityReporter = new CapabilityReporter(this.toolRegistry, this.mcpPool, this.skillManager);
+    this.toolCaller = new ToolCaller(this.toolRegistry);
+    
+    this.initializeTools();
+  }
+
+  private async initializeTools(): Promise<void> {
+    registerBuiltinTools(this.toolRegistry);
+    
+    try {
+      await this.skillManager.loadSkills();
+      const skillTools = this.skillManager.adaptAllSkills();
+      for (const tool of skillTools) {
+        this.toolRegistry.register(tool);
+      }
+    } catch (error) {
+    }
   }
 
   async start(): Promise<void> {
@@ -150,7 +184,9 @@ export class ChatSession {
     console.log(chalk.gray(`  思考过程: ${thinkingStatus}`));
     
     const summary = this.memory.getMemorySummary();
+    const toolStats = this.toolRegistry.getStats();
     console.log(chalk.gray(`  历史会话: ${chalk.cyan(summary.sessions)} 个 | 长期记忆: ${chalk.cyan(summary.memories)} 条 | 回收站: ${chalk.cyan(summary.trashCount)} 条`));
+    console.log(chalk.gray(`  工具: ${chalk.cyan(toolStats.totalTools)} 个 | MCP: ${chalk.cyan(toolStats.mcpTools)} | Skills: ${chalk.cyan(toolStats.skillTools)} | 内置: ${chalk.cyan(toolStats.builtinTools)}`));
     
     if (this.founderMode) {
       console.log(chalk.bgRed.white('  创始人模式 '));
@@ -511,7 +547,13 @@ export class ChatSession {
     try {
       const longTermPrompt = this.memory.getLongTermPrompt();
       const trashPrompt = this.memory.getTrashPrompt();
-      let systemContent = this.systemPrompt.content;
+      const capabilityReport = this.capabilityReporter.formatForPrompt();
+      const toolsPrompt = this.toolRegistry.formatForPrompt();
+      
+      let systemContent = this.systemPrompt.content
+        .replace('{{CAPABILITY_REPORT}}', capabilityReport)
+        .replace('{{TOOL_CALLING_PROMPT}}', TOOL_CALLING_PROMPT + '\n\n' + toolsPrompt);
+      
       if (longTermPrompt) {
         systemContent += '\n\n' + longTermPrompt;
       }
@@ -588,7 +630,7 @@ export class ChatSession {
             process.stdout.write(chalk.dim(chunk.replace(THINK_START_TAG, '')));
           }
         },
-        onComplete: (response) => {
+        onComplete: async (response) => {
           let finalContent = response.content;
           
           const thinkStart = finalContent.indexOf(THINK_START_TAG);
@@ -596,6 +638,34 @@ export class ChatSession {
           
           if (thinkStart !== -1 && thinkEnd !== -1) {
             finalContent = finalContent.substring(thinkEnd + THINK_END_TAG.length).trim();
+          }
+
+          if (ToolCallParser.hasToolCall(finalContent)) {
+            const { toolCall, result, cleanedText } = await this.toolCaller.executeFromText(finalContent);
+            
+            if (toolCall && result) {
+              console.log();
+              console.log(chalk.blue(`  🔧 执行工具: ${toolCall.name}`));
+              console.log(chalk.gray(`     参数: ${JSON.stringify(toolCall.args)}`));
+              
+              if (result.success) {
+                console.log(chalk.green(`     ✅ 成功`));
+                if (result.data) {
+                  const dataStr = typeof result.data === 'string' ? result.data : JSON.stringify(result.data, null, 2);
+                  const preview = dataStr.substring(0, 500);
+                  console.log(chalk.gray(`     结果: ${preview}${dataStr.length > 500 ? '...' : ''}`));
+                }
+              } else {
+                console.log(chalk.red(`     ❌ 失败: ${result.error}`));
+              }
+              
+              finalContent = cleanedText;
+              
+              if (result.success && result.data) {
+                const toolResultStr = typeof result.data === 'string' ? result.data : JSON.stringify(result.data, null, 2);
+                finalContent += `\n\n[工具执行结果]\n${toolResultStr.substring(0, 2000)}`;
+              }
+            }
           }
           
           this.messages.push({ role: 'assistant', content: finalContent });

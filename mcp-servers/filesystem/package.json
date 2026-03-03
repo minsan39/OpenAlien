@@ -1,0 +1,30 @@
+{
+  "name": "@openalien/mcp-server-filesystem",
+  "version": "0.1.0",
+  "description": "MCP Server for filesystem operations - 文件系统操作 MCP 服务器",
+  "main": "dist/index.js",
+  "bin": {
+    "openalien-mcp-filesystem": "./dist/index.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/index.js"
+  },
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "filesystem",
+    "ai",
+    "llm"
+  ],
+  "author": "OpenAlien",
+  "license": "MIT",
+  "dependencies": {},
+  "devDependencies": {
+    "@types/node": "^22.10.2",
+    "typescript": "^5.7.2"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
