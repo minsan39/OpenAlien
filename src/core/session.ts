@@ -16,6 +16,8 @@ import {
 } from '../tools';
 import { MCPPool } from '../mcp';
 import { SkillManager } from '../skills';
+import { ContextManager } from './context';
+import { TaskScheduler } from '../engine';
 
 const THINK_START_TAG = '<think&gt;';
 const THINK_END_TAG = '</think&gt;';
@@ -116,6 +118,8 @@ const COMMANDS = {
   trash: '/trash',
   emptyTrash: '/empty-trash',
   new: '/new',
+  task: '/task',
+  context: '/context',
 };
 
 export class ChatSession {
@@ -132,6 +136,9 @@ export class ChatSession {
   private skillManager: SkillManager;
   private capabilityReporter: CapabilityReporter;
   private toolCaller: ToolCaller;
+  private contextManager: ContextManager;
+  private taskScheduler: TaskScheduler | null = null;
+  private useTaskEngine: boolean = false;
 
   constructor(config: Config) {
     this.config = config;
@@ -148,6 +155,7 @@ export class ChatSession {
     this.skillManager = new SkillManager(this.mcpPool);
     this.capabilityReporter = new CapabilityReporter(this.toolRegistry, this.mcpPool, this.skillManager);
     this.toolCaller = new ToolCaller(this.toolRegistry);
+    this.contextManager = new ContextManager();
     
     this.initializeTools();
   }
@@ -188,8 +196,14 @@ export class ChatSession {
     console.log(chalk.gray(`  历史会话: ${chalk.cyan(summary.sessions)} 个 | 长期记忆: ${chalk.cyan(summary.memories)} 条 | 回收站: ${chalk.cyan(summary.trashCount)} 条`));
     console.log(chalk.gray(`  工具: ${chalk.cyan(toolStats.totalTools)} 个 | MCP: ${chalk.cyan(toolStats.mcpTools)} | Skills: ${chalk.cyan(toolStats.skillTools)} | 内置: ${chalk.cyan(toolStats.builtinTools)}`));
     
+    const ctx = this.contextManager.getCompactContext();
+    console.log(chalk.gray(`  ${ctx}`));
+    
     if (this.founderMode) {
       console.log(chalk.bgRed.white('  创始人模式 '));
+    }
+    if (this.useTaskEngine) {
+      console.log(chalk.bgBlue.white('  任务引擎模式 '));
     }
     console.log();
   }
@@ -203,6 +217,8 @@ export class ChatSession {
     console.log(chalk.gray(`    ${chalk.green('/trash')}     - 查看回收站`));
     console.log(chalk.gray(`    ${chalk.green('/clear')}     - 清空当前对话`));
     console.log(chalk.gray(`    ${chalk.green('/thinking')}  - 切换思考过程显示`));
+    console.log(chalk.gray(`    ${chalk.green('/task')}      - 切换任务引擎模式`));
+    console.log(chalk.gray(`    ${chalk.green('/context')}   - 显示当前上下文`));
     console.log(chalk.gray(`    ${chalk.green('/config')}    - 查看当前配置`));
     console.log(chalk.gray(`    ${chalk.green('/exit')}      - 退出程序`));
     printDivider();
@@ -268,8 +284,7 @@ export class ChatSession {
         break;
 
       case COMMANDS.model:
-        console.log(chalk.yellow('  切换模型功能开发中...'));
-        console.log();
+        await this.switchModel();
         break;
 
       case COMMANDS.founder:
@@ -294,6 +309,14 @@ export class ChatSession {
 
       case COMMANDS.new:
         await this.startNewSession();
+        break;
+
+      case COMMANDS.task:
+        this.toggleTaskEngine();
+        break;
+
+      case COMMANDS.context:
+        this.showContext();
         break;
 
       default:
@@ -372,6 +395,7 @@ export class ChatSession {
     }
     
     console.log(chalk.gray('  ─────────────────────────────────────────'));
+    
     console.log(chalk.gray(`  输入序号加载会话，或按回车取消`));
     console.log();
 
@@ -381,6 +405,45 @@ export class ChatSession {
     if (num >= 1 && num <= displaySessions.length) {
       const session = displaySessions[num - 1];
       await this.loadSession(session.id);
+    }
+  }
+
+  private async switchModel(): Promise<void> {
+    const provider = getProvider(this.config.provider);
+    if (!provider) {
+      console.log(chalk.red('  无效的模型提供商'));
+      return;
+    }
+
+    console.log();
+    console.log(chalk.cyan('  🔄 切换模型'));
+    console.log(chalk.gray('  ─────────────────────'));
+    console.log(chalk.gray(`  当前: ${chalk.yellow(provider.name)} / ${chalk.green(this.config.model)}`));
+    console.log();
+    
+    for (let i = 0; i < provider.models.length; i++) {
+      const m = provider.models[i];
+      const isCurrent = m === this.config.model;
+      console.log(chalk.gray(`  ${chalk.yellow(`[${i + 1}]`)} ${m} ${isCurrent ? chalk.green('(当前)') : ''}`));
+    }
+    console.log();
+    console.log(chalk.gray('  输入序号切换，或按回车取消'));
+    console.log();
+
+    const answer = await this.getInput();
+    const num = parseInt(answer.trim());
+    
+    if (num >= 1 && num <= provider.models.length) {
+      const newModel = provider.models[num - 1];
+      this.config.model = newModel;
+      this.messages = [];
+      this.memory.startSession(this.config.provider, this.config.model);
+      console.log();
+      console.log(chalk.green(`  ✅ 已切换到: ${provider.name} / ${chalk.yellow(newModel)}`));
+      console.log();
+    } else {
+      console.log(chalk.gray('  已取消'));
+      console.log();
     }
   }
 
@@ -521,15 +584,102 @@ export class ChatSession {
     await this.memory.saveAndClose();
     this.messages = [];
     this.memory.startSession(this.config.provider, this.config.model);
+    this.contextManager.updateSystemContext({
+      provider: this.config.provider,
+      model: this.config.model,
+    });
     console.log(chalk.green('  ✅ 已开始新对话'));
     console.log();
   }
 
+  private toggleTaskEngine(): void {
+    this.useTaskEngine = !this.useTaskEngine;
+    
+    if (this.useTaskEngine) {
+      if (!this.taskScheduler) {
+        this.taskScheduler = new TaskScheduler(this.toolRegistry, this.memory, this.config);
+      }
+      console.log();
+      console.log(chalk.bgBlue.white('  🚀 任务引擎模式已激活  '));
+      console.log(chalk.gray('  AI 将自动规划并分解复杂任务'));
+      console.log();
+    } else {
+      console.log();
+      console.log(chalk.green('  ✅ 任务引擎模式已关闭'));
+      console.log(chalk.gray('  已切换回普通对话模式'));
+      console.log();
+    }
+  }
+
+  private showContext(): void {
+    console.log();
+    console.log(this.contextManager.formatForPrompt());
+    console.log();
+  }
+
+  private async callAI(): Promise<{ content: string }> {
+    const longTermPrompt = this.memory.getLongTermPrompt();
+    const trashPrompt = this.memory.getTrashPrompt();
+    const capabilityReport = this.capabilityReporter.formatForPrompt();
+    const toolsPrompt = this.toolRegistry.formatForPrompt();
+    const contextPrompt = this.contextManager.formatForPrompt();
+    
+    let systemContent = this.systemPrompt.content
+      .replace('{{CAPABILITY_REPORT}}', capabilityReport)
+      .replace('{{TOOL_CALLING_PROMPT}}', TOOL_CALLING_PROMPT + '\n\n' + toolsPrompt);
+    
+    systemContent = contextPrompt + '\n\n' + systemContent;
+    
+    if (longTermPrompt) {
+      systemContent += '\n\n' + longTermPrompt;
+    }
+    if (trashPrompt) {
+      systemContent += '\n\n' + trashPrompt;
+    }
+    
+    const relevantMemories = this.memory.getRelevantMemories(
+      this.messages.slice(-3).map(m => m.content).join(' '),
+      3
+    );
+    if (relevantMemories.length > 0) {
+      systemContent += '\n\n【相关记忆】\n' + relevantMemories.map(m => `- ${m.content}`).join('\n');
+    }
+    
+    const messagesWithSystem: Message[] = [
+      { role: 'system', content: systemContent },
+      ...this.messages,
+    ];
+    
+    return new Promise((resolve, reject) => {
+      let fullContent = '';
+      
+      chatStream(this.config, messagesWithSystem, {
+        onReasoning: () => {},
+        onContent: (chunk) => {
+          fullContent += chunk;
+        },
+        onComplete: (response) => {
+          resolve(response);
+        },
+        onError: (error) => {
+          reject(error);
+        }
+      });
+    });
+  }
+
   private async handleMessage(content: string): Promise<void> {
     this.messages.push({ role: 'user', content });
+    this.contextManager.incrementMessageCount();
+    this.contextManager.addTopic(content.substring(0, 30));
     
     if (!this.founderMode) {
       this.memory.addMessage('user', content);
+    }
+
+    if (this.useTaskEngine && this.taskScheduler) {
+      await this.handleMessageWithTaskEngine(content);
+      return;
     }
 
     const spinner = ora({
@@ -640,32 +790,124 @@ export class ChatSession {
             finalContent = finalContent.substring(thinkEnd + THINK_END_TAG.length).trim();
           }
 
-          if (ToolCallParser.hasToolCall(finalContent)) {
+          // 多轮工具调用循环（带验证机制）
+          let maxToolCalls = 3; // 最多3次工具调用
+          let toolCallCount = 0;
+          
+          while (ToolCallParser.hasToolCall(finalContent) && toolCallCount < maxToolCalls) {
+            toolCallCount++;
+            
             const { toolCall, result, cleanedText } = await this.toolCaller.executeFromText(finalContent);
             
             if (toolCall && result) {
               console.log();
-              console.log(chalk.blue(`  🔧 执行工具: ${toolCall.name}`));
+              console.log(chalk.blue(`  🔧 执行工具 [${toolCallCount}/${maxToolCalls}]: ${toolCall.name}`));
               console.log(chalk.gray(`     参数: ${JSON.stringify(toolCall.args)}`));
               
               if (result.success) {
-                console.log(chalk.green(`     ✅ 成功`));
+                console.log(chalk.green(`     ✅ 执行成功`));
                 if (result.data) {
                   const dataStr = typeof result.data === 'string' ? result.data : JSON.stringify(result.data, null, 2);
-                  const preview = dataStr.substring(0, 500);
-                  console.log(chalk.gray(`     结果: ${preview}${dataStr.length > 500 ? '...' : ''}`));
+                  const preview = dataStr.substring(0, 300);
+                  console.log(chalk.gray(`     结果预览: ${preview}${dataStr.length > 300 ? '...' : ''}`));
                 }
               } else {
-                console.log(chalk.red(`     ❌ 失败: ${result.error}`));
+                console.log(chalk.red(`     ❌ 执行失败: ${result.error}`));
               }
               
-              finalContent = cleanedText;
+              const toolResultStr = result.success && result.data
+                ? (typeof result.data === 'string' ? result.data : JSON.stringify(result.data, null, 2))
+                : `错误: ${result.error}`;
               
-              if (result.success && result.data) {
-                const toolResultStr = typeof result.data === 'string' ? result.data : JSON.stringify(result.data, null, 2);
-                finalContent += `\n\n[工具执行结果]\n${toolResultStr.substring(0, 2000)}`;
+              // 添加AI的中间响应（包含工具调用）
+              this.messages.push({ role: 'assistant', content: cleanedText });
+              
+              // 构建验证提示消息
+              const verificationPrompt = result.success
+                ? `[工具 ${toolCall.name} 执行成功]
+
+返回结果：
+${toolResultStr}
+
+---
+请验证以上结果：
+1. 结果是否完整且符合用户的要求？
+2. 如果符合要求，请用自然语言汇总结果回答用户
+3. 如果不符合要求，请分析原因并重新调用工具（修正参数或换其他工具）
+4. 你还可以调用 ${maxToolCalls - toolCallCount} 次工具
+
+注意：最终回答时不要直接展示原始数据，要用友好的中文自然语言表达。`
+                : `[工具 ${toolCall.name} 执行失败]
+
+错误信息：${toolResultStr}
+
+---
+请分析错误原因：
+1. 检查工具名称是否正确（必须是可用工具列表中的完整名称）
+2. 检查参数是否正确
+3. 如果需要重试，请修正后重新调用工具
+4. 你还可以调用 ${maxToolCalls - toolCallCount} 次工具`;
+              
+              this.messages.push({ role: 'user', content: verificationPrompt });
+              
+              console.log();
+              console.log(chalk.gray(`  🔍 验证结果并生成回答...`));
+              
+              const newSpinner = ora({
+                text: chalk.yellow('  🛸 正在思考...'),
+                spinner: 'dots',
+              }).start();
+              
+              try {
+                const newResponse = await this.callAI();
+                newSpinner.stop();
+                
+                let newContent = newResponse.content;
+                const newThinkStart = newContent.indexOf(THINK_START_TAG);
+                const newThinkEnd = newContent.indexOf(THINK_END_TAG);
+                
+                if (newThinkStart !== -1 && newThinkEnd !== -1) {
+                  const thinkContent = newContent.substring(newThinkStart + THINK_START_TAG.length, newThinkEnd);
+                  if (this.showThinking) {
+                    console.log();
+                    console.log(chalk.gray('  💭 验证思考:'));
+                    console.log(chalk.gray('  ─────────────────────────'));
+                    console.log(chalk.dim(thinkContent.trim()));
+                    console.log(chalk.gray('  ─────────────────────────'));
+                  }
+                  newContent = newContent.substring(newThinkEnd + THINK_END_TAG.length).trim();
+                }
+                
+                // 移除之前的中间消息
+                this.messages.pop();
+                this.messages.pop();
+                
+                finalContent = newContent;
+                
+                // 检查是否需要再次调用工具
+                if (ToolCallParser.hasToolCall(finalContent)) {
+                  console.log(chalk.yellow('  ⚠️ 结果不符合要求，准备重试...'));
+                  continue;
+                }
+                
+                // 显示最终回答
+                console.log();
+                console.log(chalk.magenta('  🛸: ') + chalk.white(finalContent));
+                
+              } catch (error: any) {
+                newSpinner.stop();
+                console.log(chalk.red('  ❌ 生成回答失败: ' + error.message));
+                finalContent = cleanedText + '\n\n[工具执行结果]\n' + toolResultStr;
               }
+            } else {
+              break;
             }
+          }
+          
+          // 如果达到最大调用次数仍有工具调用，提示用户
+          if (ToolCallParser.hasToolCall(finalContent)) {
+            console.log(chalk.yellow('  ⚠️ 已达到最大工具调用次数，使用当前结果回答'));
+            finalContent = ToolCallParser.removeToolCalls(finalContent);
           }
           
           this.messages.push({ role: 'assistant', content: finalContent });
@@ -697,6 +939,111 @@ export class ChatSession {
     }
   }
 
+  private async handleMessageWithTaskEngine(content: string): Promise<void> {
+    if (!this.taskScheduler) return;
+
+    console.log();
+    console.log(chalk.blue('  🚀 任务引擎模式'));
+    console.log(chalk.gray('  ─────────────────────────'));
+
+    const task = this.taskScheduler.submit(content, 'normal');
+    console.log(chalk.gray(`  📝 已创建任务: ${task.id}`));
+    console.log(chalk.gray(`     描述: ${content.substring(0, 50)}${content.length > 50 ? '...' : ''}`));
+
+    const spinner = ora({
+      text: chalk.yellow('  🔄 正在规划任务...'),
+      spinner: 'dots',
+    }).start();
+
+    this.taskScheduler.on('planning', (t) => {
+      spinner.text = chalk.yellow('  🧠 正在分析任务...');
+    });
+
+    this.taskScheduler.on('planned', (t, plan) => {
+      spinner.stop();
+      console.log();
+      if (plan.subTasks && plan.subTasks.length > 0) {
+        console.log(chalk.cyan(`  📋 任务已分解为 ${plan.subTasks.length} 个子任务:`));
+        for (let i = 0; i < plan.subTasks.length; i++) {
+          const subTask = plan.subTasks[i];
+          console.log(chalk.gray(`     ${i + 1}. ${subTask.description}`));
+        }
+      } else if (plan.toolToUse) {
+        console.log(chalk.cyan(`  🔧 将使用工具: ${plan.toolToUse.toolName}`));
+      }
+      spinner.start();
+      spinner.text = chalk.yellow('  ⚙️ 正在执行任务...');
+    });
+
+    this.taskScheduler.on('executing', (t) => {
+      if (t.toolName) {
+        spinner.text = chalk.yellow(`  🔧 执行: ${t.toolName}...`);
+        this.contextManager.recordToolUsage(t.toolName);
+      }
+    });
+
+    this.taskScheduler.on('completed', (t, result) => {
+      spinner.stop();
+      console.log();
+      console.log(chalk.green(`  ✅ 任务完成: ${t.description.substring(0, 30)}`));
+      if (result.data) {
+        const dataStr = typeof result.data === 'string' ? result.data : JSON.stringify(result.data, null, 2);
+        const preview = dataStr.substring(0, 200);
+        console.log(chalk.gray(`     结果: ${preview}${dataStr.length > 200 ? '...' : ''}`));
+      }
+      spinner.start();
+    });
+
+    this.taskScheduler.on('failed', (t, error) => {
+      spinner.stop();
+      console.log();
+      console.log(chalk.red(`  ❌ 任务失败: ${t.description.substring(0, 30)}`));
+      console.log(chalk.red(`     错误: ${error}`));
+      spinner.start();
+    });
+
+    try {
+      const results = await this.taskScheduler.run();
+      
+      spinner.stop();
+      console.log();
+      console.log(chalk.gray('  ─────────────────────────'));
+      
+      const stats = this.taskScheduler.getStats();
+      console.log(chalk.cyan(`  📊 执行统计:`));
+      console.log(chalk.gray(`     总任务: ${stats.total}`));
+      console.log(chalk.gray(`     成功: ${chalk.green(stats.completed.toString())}`));
+      console.log(chalk.gray(`     失败: ${chalk.red(stats.failed.toString())}`));
+      console.log();
+
+      const mainTask = this.taskScheduler.getTask(task.id);
+      if (mainTask?.result?.success && mainTask.result.data) {
+        console.log(chalk.magenta('  🛸: ') + chalk.white('任务已完成，以下是结果摘要：'));
+        console.log();
+        
+        const resultData = mainTask.result.data;
+        if (typeof resultData === 'object' && resultData.subTaskIds) {
+          console.log(chalk.gray('  所有子任务已完成，结果已整合。'));
+        } else {
+          const dataStr = typeof resultData === 'string' ? resultData : JSON.stringify(resultData, null, 2);
+          console.log(chalk.gray(dataStr.substring(0, 500)));
+        }
+      } else if (stats.failed > 0) {
+        console.log(chalk.yellow('  ⚠️ 部分任务执行失败，请检查错误信息。'));
+      }
+      
+      console.log();
+      this.messages.push({ role: 'assistant', content: `任务执行完成。成功: ${stats.completed}, 失败: ${stats.failed}` });
+      
+    } catch (error: any) {
+      spinner.stop();
+      console.log(chalk.red('  ❌ 任务引擎执行失败: ' + error.message));
+      console.log();
+    }
+
+    this.taskScheduler.clear();
+  }
+
   private async exit(): Promise<void> {
     console.log();
     
@@ -711,6 +1058,12 @@ export class ChatSession {
     
     console.log(chalk.gray('  正在保存会话...'));
     await this.memory.saveAndClose();
+    
+    this.contextManager.updateMemoryStats({
+      longTermCount: this.memory.getMemorySummary().memories,
+      sessionCount: this.memory.getMemorySummary().sessions,
+      trashCount: this.memory.getMemorySummary().trashCount,
+    });
     
     console.log(chalk.gray('  正在回顾历史记忆...'));
     await this.memory.reviewRecentSessions();
@@ -727,5 +1080,68 @@ export class ChatSession {
   stop(): void {
     this.running = false;
     this.rl.close();
+  }
+
+  getMemoryStats(): { sessions: number; memories: number; trashCount: number } {
+    const summary = this.memory.getMemorySummary();
+    return {
+      sessions: summary.sessions,
+      memories: summary.memories,
+      trashCount: summary.trashCount,
+    };
+  }
+
+  async sendMessageWithCallback(input: string, onResponse: (content: string) => void): Promise<void> {
+    this.messages.push({ role: 'user', content: input });
+    
+    if (!this.founderMode) {
+      this.memory.addMessage('user', input);
+    }
+
+    const longTermPrompt = this.memory.getLongTermPrompt();
+    const trashPrompt = this.memory.getTrashPrompt();
+    const capabilityReport = this.capabilityReporter.formatForPrompt();
+    const toolsPrompt = this.toolRegistry.formatForPrompt();
+    
+    let systemContent = this.systemPrompt.content
+      .replace('{{CAPABILITY_REPORT}}', capabilityReport)
+      .replace('{{TOOL_CALLING_PROMPT}}', TOOL_CALLING_PROMPT + '\n\n' + toolsPrompt);
+    
+    if (longTermPrompt) {
+      systemContent += '\n\n' + longTermPrompt;
+    }
+    if (trashPrompt) {
+      systemContent += '\n\n' + trashPrompt;
+    }
+    
+    const messagesWithSystem: Message[] = [
+      { role: 'system', content: systemContent },
+      ...this.messages,
+    ];
+    
+    return new Promise((resolve, reject) => {
+      let fullContent = '';
+      
+      chatStream(this.config, messagesWithSystem, {
+        onReasoning: () => {},
+        onContent: (chunk) => {
+          fullContent += chunk;
+        },
+        onComplete: (response) => {
+          const finalContent = response.content;
+          this.messages.push({ role: 'assistant', content: finalContent });
+          
+          if (!this.founderMode) {
+            this.memory.addMessage('assistant', finalContent);
+          }
+          
+          onResponse(finalContent);
+          resolve();
+        },
+        onError: (error) => {
+          reject(error);
+        }
+      });
+    });
   }
 }

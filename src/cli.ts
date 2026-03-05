@@ -1,7 +1,21 @@
 #!/usr/bin/env node
 
+if (process.platform === 'win32') {
+  process.env['TERM'] = 'xterm-utf8';
+  process.env['FORCE_COLOR'] = '1';
+  try {
+    require('child_process').execSync('chcp 65001', { stdio: 'ignore' });
+  } catch {}
+}
+
+if (process.stdout) {
+  process.stdout.setEncoding('utf8');
+}
+if (process.stderr) {
+  process.stderr.setEncoding('utf8');
+}
+
 import { getConfig, isConfigured, resetConfig } from './config';
-import { runSetup, printLogo, printGoodbye } from './ui';
 import { ChatSession } from './core';
 
 const args = process.argv.slice(2);
@@ -32,11 +46,10 @@ async function main() {
     process.exit(0);
   }
 
-  printLogo();
-
   let config = getConfig();
 
   if (!config || !isConfigured()) {
+    const { runSetup } = await import('./ui/setup');
     config = await runSetup();
   }
 
@@ -44,7 +57,6 @@ async function main() {
   
   process.on('SIGINT', () => {
     session.stop();
-    printGoodbye();
     process.exit(0);
   });
 

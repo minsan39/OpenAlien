@@ -28,27 +28,51 @@ const currentTimeExecutor: ToolExecutor = async (
   const now = new Date();
   const format = args.format || 'full';
   
-  let result: string;
+  const weekdays = ['星期日', '星期一', '星期二', '星期三', '星期四', '星期五', '星期六'];
+  const year = now.getFullYear();
+  const month = now.getMonth() + 1;
+  const day = now.getDate();
+  const weekday = weekdays[now.getDay()];
+  const hour = now.getHours();
+  const minute = now.getMinutes();
+  const second = now.getSeconds();
+  
+  const period = hour < 6 ? '凌晨' : hour < 9 ? '早上' : hour < 12 ? '上午' : hour < 14 ? '中午' : hour < 17 ? '下午' : hour < 19 ? '傍晚' : '晚上';
+  const hour12 = hour === 0 ? 12 : hour > 12 ? hour - 12 : hour;
+  
+  const friendlyText = `今天是${year}年${month}月${day}日${weekday}，现在是${period}${hour12}点${minute}分`;
+  
+  let formatted: string;
   switch (format) {
     case 'date':
-      result = now.toLocaleDateString('zh-CN');
+      formatted = `${year}年${month}月${day}日${weekday}`;
       break;
     case 'time':
-      result = now.toLocaleTimeString('zh-CN');
+      formatted = `${period}${hour12}点${minute}分${second}秒`;
       break;
     case 'iso':
-      result = now.toISOString();
+      formatted = now.toISOString();
       break;
     default:
-      result = now.toLocaleString('zh-CN');
+      formatted = `${year}年${month}月${day}日 ${hour.toString().padStart(2, '0')}:${minute.toString().padStart(2, '0')}:${second.toString().padStart(2, '0')}`;
   }
 
   return {
     success: true,
     data: {
       timestamp: now.getTime(),
-      formatted: result,
-      format,
+      formatted,
+      friendly: friendlyText,
+      details: {
+        year,
+        month,
+        day,
+        weekday,
+        hour,
+        minute,
+        second,
+        period,
+      },
     },
   };
 };
